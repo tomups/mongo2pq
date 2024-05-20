@@ -84,7 +84,7 @@ class Schema:
                         renamed = True
 
 
-    def dump_to_file(self, filename: str | None = None, destination: Path = Path('.')):
+    def dump_to_file(self, filename: str | None = None, destination = '.'):
         import yaml
 
         def schema_representer(dumper: yaml.Dumper, schema: Schema):
@@ -99,13 +99,21 @@ class Schema:
 
         yaml.add_representer(Schema, schema_representer, Dumper=yaml.CDumper)  # type: ignore
 
-        if not destination.is_dir():
-            destination.mkdir()
         if not filename:
             filename = self._name + '.yaml'
-        new_file_path = destination / filename
-        with new_file_path.open('w') as schema_f:
-            yaml.dump(self, schema_f, Dumper=yaml.CDumper, sort_keys=False)
+
+        if '://' in destination:
+            filesystem, path = pa.fs.FileSystem.from_uri(destination)
+            with filesystem.open_output_stream(path + '/' + filename) as file:
+                yaml_content = yaml.dump(self, Dumper=yaml.CDumper, sort_keys=False)
+                file.write(yaml_content.encode('utf-8'))
+        else:
+            destination_path = Path(destination)
+            if not destination_path.is_dir():
+                destination_path.mkdir(parents=True, exist_ok=True)
+            new_file_path = destination_path / filename
+            with new_file_path.open('w') as schema_f:
+                yaml.dump(self, schema_f, Dumper=yaml.CDumper, sort_keys=False)
 
     def create_record_batch(self, batch: List[Mapping[str, Any]]) -> pa.RecordBatch:
         def cast_row(row: Mapping[str, Any]) -> Mapping[str, Any]:
