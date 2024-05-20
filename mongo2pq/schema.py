@@ -152,6 +152,8 @@ class Schema:
                     self._cast_table_property[field_name] = (str, str)
                 elif pa_types.is_binary(field_type):
                     self._cast_table_property[field_name] = (bytes, bytes)
+                elif pa_types.is_struct(field_type):
+                    self._cast_table_property[field_name] = (dict, dict)
                 else:
                     raise NotImplementedError(f"Casting for type {field_type} has not been implemented")
 
@@ -177,7 +179,7 @@ def load_schema_from_file(schema_file: Path) -> Schema:
         schema_mapping = loader.construct_mapping(node, deep=True)
         try:
             schema_mapping['fields'] = {
-                field_name: pa.type_for_alias(field_value)
+                field_name: parse_field_type(field_value)
                 for field_name, field_value in schema_mapping['fields'].items()
             }
 
@@ -186,6 +188,59 @@ def load_schema_from_file(schema_file: Path) -> Schema:
             raise SchemaParseError(f"PyArrow fields couldn't be constructed: {e!s}")
 
         return Schema(schema_mapping['name'], fields=schema_mapping['fields'])
+
+    def parse_field_type(field_type: str) -> pa.DataType:
+        if field_type.startswith('struct'):
+            return parse_struct_type(field_type)
+        else:
+            return pa.type_for_alias(field_type)
+
+    def parse_struct_type(struct_type: str) -> pa.DataType:
+        # Remove 'struct<' prefix and '>' suffix
+        struct_body = struct_type[
+            len('struct<') : -1
+        ]
+        fields = []
+        while struct_body:
+            nested_start = struct_body.find('struct<')
+            if nested_start != -1 and (
+                struct_body.find(',') > nested_start or struct_body.find(',') == -1
+            ):
+                field_name, nested_struct = struct_body.split(':', 1)
+                nested_end = find_matching_bracket(nested_struct)
+                fields.append(
+                    pa.field(
+                        field_name.strip(),
+                        parse_struct_type(nested_struct[: nested_end + 1]),
+                    )
+                )
+                struct_body = (
+                    nested_struct[nested_end + 2 :]
+                    if nested_end + 2 < len(nested_struct)
+                    else ''
+                )
+            else:
+                field_name, field_type, struct_body = struct_body.partition(',')
+                field_name = field_name.replace('<', '')
+                fields.append(
+                    pa.field(
+                        field_name.split(':')[0].strip(),
+                        pa.type_for_alias(field_name.split(':')[1].strip()),
+                    )
+                )
+        return pa.struct(fields)
+
+    def find_matching_bracket(s: str) -> int:
+        # Find the index of the matching '>' for the first '<' in the string
+        balance = 0
+        for i, char in enumerate(s):
+            if char == '<':
+                balance += 1
+            elif char == '>':
+                balance -= 1
+                if balance == 0:
+                    return i
+        return -1
 
     yaml.add_constructor('!schema', schema_constructor, Loader=yaml.CLoader)  # type: ignore
 
@@ -256,6 +311,17 @@ def unify_types(type1: pa.DataType, type2: pa.DataType) -> pa.DataType:
                 if type_test(type2):
                     return type2
         return None
+
+    if isinstance(type1, pa.StructType) and isinstance(type2, pa.StructType):
+        fields = {}
+        for field in type1:
+            fields[field.name] = field.type
+        for field in type2:
+            if field.name in fields:
+                fields[field.name] = unify_types(fields[field.name], field.type)
+            else:
+                fields[field.name] = field.type
+        return pa.struct(fields)
 
     int_type = check_category(
         pa_types.is_integer,
@@ -329,12 +395,35 @@ def is_timestamp(value: int | float, range: int=5) -> bool:
 
 
 def infer_type(value: Any, name: str) -> pa.DataType:
-    if isinstance(value, dict | list):
-        raise NotImplemented(
-            "Inferring types for list or dict fields is not implemented"
-        )
+    if isinstance(value, dict):
+        return pa.struct([pa.field(k, infer_type(v, f'{k}')) for k, v in value.items()])
+    if isinstance(value, list):
+        if not value:
+            return pa.list_(pa.null())
+        else:
+            return pa.list_(infer_type(value[0], name))
 
     if isinstance(value, str):
+        try:
+            # Attempt to interpret the string as JSON
+            import json
+
+            json_value = json.loads(value)
+            if isinstance(json_value, dict):
+                return pa.struct(
+                    [
+                        pa.field(k, infer_type(v, f'{name}.{k}'))
+                        for k, v in json_value.items()
+                    ]
+                )
+            elif isinstance(json_value, list):
+                if not json_value:
+                    return pa.list_(pa.null())
+                else:
+                    return pa.list_(infer_type(json_value[0], f'{name}[0]'))
+        except json.JSONDecodeError:
+            pass
+
         value = cast_from_string(value)
         # Cast unsuccessful, the value remains string
         if isinstance(value, str):
