@@ -17,7 +17,7 @@ from mongo2pq.schema import infer_schema, load_schema_from_file
 def main(
     uri: str, *,
     db: str | None = None, collections: List[str] | None = None,
-    outdir: Path = Path('.'),
+    outdir = '.',
     schema_paths: List[Path] | None = None, samples: int = 20000,
     partition_key: str | None = None, config_file: Path | None = None,
     debug_config: bool = False, cli: bool = True
@@ -109,8 +109,8 @@ def parse_args() -> Namespace | None:
     )
     parser.add_argument(
         '-o', '--outdir',
-        default='./', type=Path,
-        help="Destination for the output parquet files and schema files"
+        default='./',
+        help="Destination for the output parquet files and schema files. Can be a local folder or an URI like s3://, hdfs://, gcs://... as long as it's supported by PyArrow"
     )
     parser.add_argument(
         '-s', '--samples',

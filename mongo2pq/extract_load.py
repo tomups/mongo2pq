@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 from typing import Mapping, List, Any
+import pyarrow.fs as pa_fs
 
 from motor.motor_asyncio import AsyncIOMotorCollection
 from tqdm import tqdm
@@ -13,13 +14,15 @@ from mongo2pq.mongo import generate_partitions
 async def extract_load_collection(
         collection: AsyncIOMotorCollection,
         schema: Schema,
-        outdir: Path = Path('.'),
+        outdir = '.',
         partition_key: str | None = None,
         batch_size: int | None = None,
         progress_bar: bool = True
 ):
-    if not outdir.is_dir():
-        outdir.mkdir(parents=True)
+    if '://' not in outdir:
+        outdir = Path(outdir)
+        if not outdir.is_dir():
+            outdir.mkdir(parents=True)
 
     n_docs = await collection.estimated_document_count()
     pbar = None
@@ -34,10 +37,9 @@ async def extract_load_collection(
         avg_size = sum(sizes) / len(samples)
         batch_size = int(batch_size_bytes / avg_size)
 
-
     async with asyncio.TaskGroup() as tgroup:
         if not partition_key:
-            outfile = outdir / f'{collection.name}.parquet'
+            outfile = f'{outdir}/{collection.name}.parquet'
             tgroup.create_task(extract_load_part(
                 tgroup,
                 collection=collection, schema=schema, path=outfile,
@@ -46,8 +48,9 @@ async def extract_load_collection(
         else:
             partitions = await generate_partitions(collection, partition_key)
             for partition in partitions:
-                outfile = outdir / f'{collection.name}.parquet' / f'{partition_key}={partition}' / 'data.parquet'
-                outfile.parent.mkdir(parents=True)
+                outfile = f'{outdir}/{collection.name}.parquet/{partition_key}={partition}/data.parquet'
+                if '://' not in outdir:
+                    Path(outfile).parent.mkdir(parents=True)
                 filter = {partition_key: partition}
                 tgroup.create_task(extract_load_part(
                     tgroup, collection=collection, schema=schema,
@@ -55,24 +58,27 @@ async def extract_load_collection(
                     batch_size=batch_size, pbar_instance=pbar
                 ))
 
-
 async def extract_load_part(
         taskgroup: asyncio.TaskGroup,
         *, collection: AsyncIOMotorCollection,
         schema: Schema,
-        path: Path,
+        path: str,
         filter: Mapping,
         batch_size: int,
         pbar_instance: tqdm | None = None
 ):
-    pwriter = ParquetWriter(path, schema.schema())
+    if '://' in path:
+        filesystem, path = pa_fs.FileSystem.from_uri(path)
+        pwriter = ParquetWriter(filesystem.open_output_stream(path), schema.schema())
+    else:
+        pwriter = ParquetWriter(Path(path), schema.schema())
+    
     cursor = collection.find(filter, batch_size=batch_size)
     while cursor.alive:
         batch = await cursor.to_list(batch_size)
         taskgroup.create_task(
             write_batch_to_parquet(batch, schema, pwriter, not cursor.alive, pbar_instance)  # type: ignore
         )
-
 
 async def write_batch_to_parquet(
         batch: List[Mapping[str, Any]],
