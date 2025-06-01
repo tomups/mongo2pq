@@ -37,7 +37,7 @@ class Schema:
 
         try:
             new_schema = pa.unify_schemas([self._schema, other._schema])
-        except pa.ArrowInvalid:
+        except (pa.ArrowInvalid, pa.ArrowTypeError):
             mutable = pa.schema(other._schema)
             for i, field in enumerate(self._schema):
                 if (other_i := mutable.get_field_index(field.name)) >= 0:

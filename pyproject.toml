@@ -6,15 +6,15 @@ authors = ["Tadeas Uhlir <tadeas.uhlir@gmail.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.11"
-pymongo = "^4.5.0"
+python = "^3.13"
+pymongo = "^4.13.0"
 pyarrow = "^20.0.0"
-motor = "^3.3.1"
-tqdm = "^4.66.1"
-pyyaml = "^6.0.1"
+motor = "^3.7.1"
+tqdm = "^4.67.1"
+pyyaml = "^6.0.2"
 
 [tool.poetry.group.dev.dependencies]
-ipython = "^8.16.1"
+ipython = "^9.3.0"
 
 [tool.poetry.scripts]
 mongo2pq = 'mongo2pq.main:run'
