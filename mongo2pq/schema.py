@@ -161,7 +161,42 @@ class Schema:
                 elif pa_types.is_binary(field_type):
                     self._cast_table_property[field_name] = (bytes, bytes)
                 elif pa_types.is_struct(field_type):
-                    self._cast_table_property[field_name] = (dict, dict)
+                    def cast_struct(value: Any) -> dict:
+                        if value is None:
+                            return {}
+                        if not isinstance(value, dict):
+                            # Try to convert to dict if possible
+                            if hasattr(value, '__dict__'):
+                                value = value.__dict__
+                            else:
+                                return {}
+                        
+                        # Cast each field in the struct according to its type
+                        result = {}
+                        for struct_field in field_type:
+                            field_name = struct_field.name
+                            field_type_inner = struct_field.type
+                            if field_name in value:
+                                result[field_name] = self._cast_value_to_type(value[field_name], field_type_inner)
+                            # If field is missing, we'll let PyArrow handle it (could be nullable)
+                        
+                        return result
+                    
+                    self._cast_table_property[field_name] = (dict, cast_struct)
+                elif pa_types.is_list(field_type):
+                    inner_type = field_type.value_type
+                    
+                    def cast_list(value: Any) -> list:
+                        if value is None:
+                            return []
+                        if isinstance(value, list):
+                            # Recursively cast each element using the existing casting logic
+                            return [self._cast_value_to_type(item, inner_type) for item in value]
+                        else:
+                            # Handle single values by wrapping them in a list and casting
+                            return [self._cast_value_to_type(value, inner_type)]
+                    
+                    self._cast_table_property[field_name] = (list, cast_list)
                 else:
                     raise NotImplementedError(f"Casting for type {field_type} has not been implemented")
 
@@ -172,6 +207,49 @@ class Schema:
         if isinstance(field, target_type):
             return field
         return cast_func(field)
+    
+    def _cast_value_to_type(self, value: Any, target_type: pa.DataType) -> Any:
+        """Cast a value to a specific PyArrow type using the existing casting logic."""
+        if pa_types.is_boolean(target_type):
+            if isinstance(value, int):
+                return value == 1
+            elif isinstance(value, str):
+                return value.lower() in ['true', 'yes']
+            return bool(value) if value is not None else False
+        elif pa_types.is_integer(target_type):
+            return int(value) if value is not None else 0
+        elif pa_types.is_floating(target_type):
+            return float(value) if value is not None else 0.0
+        elif pa_types.is_date(target_type):
+            if value is not None:
+                return datetime.fromisoformat(str(value))
+            return datetime.now()
+        elif pa_types.is_timestamp(target_type):
+            if value is None:
+                return 0
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                return float(value)
+        elif pa_types.is_string(target_type):
+            return str(value) if value is not None else ""
+        elif pa_types.is_binary(target_type):
+            return bytes(value) if value is not None else b""
+        elif pa_types.is_struct(target_type):
+            return dict(value) if value is not None else {}
+        elif pa_types.is_list(target_type):
+            # Handle nested lists recursively
+            if value is None:
+                return []
+            if isinstance(value, list):
+                inner_type = target_type.value_type
+                return [self._cast_value_to_type(item, inner_type) for item in value]
+            else:
+                inner_type = target_type.value_type
+                return [self._cast_value_to_type(value, inner_type)]
+        else:
+            # Default to string for unknown types
+            return str(value) if value is not None else ""
 
     def name(self) -> str:
         return self._name
