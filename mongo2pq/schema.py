@@ -120,8 +120,9 @@ class Schema:
             return {
                 self._rename_map.get(key, key): self._cast_field(self._rename_map.get(key, key), field)
                 for key, field in row.items()
-                # 'if field' to ignore empty strings and Nones
-                if field and self._rename_map.get(key, key) in self._cast_table()
+                # Skip nulls and empty strings/containers, but keep False and 0
+                if field is not None and not (isinstance(field, (str, list, dict)) and not field)
+                and self._rename_map.get(key, key) in self._cast_table()
             }
 
         return pa.RecordBatch.from_pylist(
@@ -134,7 +135,7 @@ class Schema:
                 if pa_types.is_boolean(field_type):
 
                     def cast_boolean(value: Any) -> bool:
-                        if isinstance(value, str):
+                        if isinstance(value, int):
                             return value == 1
                         elif isinstance(value, str):
                             return value.lower() in ['true', 'yes']
@@ -160,43 +161,12 @@ class Schema:
                     self._cast_table_property[field_name] = (str, str)
                 elif pa_types.is_binary(field_type):
                     self._cast_table_property[field_name] = (bytes, bytes)
-                elif pa_types.is_struct(field_type):
-                    def cast_struct(value: Any) -> dict:
-                        if value is None:
-                            return {}
-                        if not isinstance(value, dict):
-                            # Try to convert to dict if possible
-                            if hasattr(value, '__dict__'):
-                                value = value.__dict__
-                            else:
-                                return {}
-                        
-                        # Cast each field in the struct according to its type
-                        result = {}
-                        for struct_field in field_type:
-                            field_name = struct_field.name
-                            field_type_inner = struct_field.type
-                            if field_name in value:
-                                result[field_name] = self._cast_value_to_type(value[field_name], field_type_inner)
-                            # If field is missing, we'll let PyArrow handle it (could be nullable)
-                        
-                        return result
-                    
-                    self._cast_table_property[field_name] = (dict, cast_struct)
-                elif pa_types.is_list(field_type):
-                    inner_type = field_type.value_type
-                    
-                    def cast_list(value: Any) -> list:
-                        if value is None:
-                            return []
-                        if isinstance(value, list):
-                            # Recursively cast each element using the existing casting logic
-                            return [self._cast_value_to_type(item, inner_type) for item in value]
-                        else:
-                            # Handle single values by wrapping them in a list and casting
-                            return [self._cast_value_to_type(value, inner_type)]
-                    
-                    self._cast_table_property[field_name] = (list, cast_list)
+                elif pa_types.is_struct(field_type) or pa_types.is_list(field_type):
+                    # Bind the type now: a closure over the loop variable would see the last one.
+                    self._cast_table_property[field_name] = (
+                        dict if pa_types.is_struct(field_type) else list,
+                        lambda value, t=field_type: self._cast_value_to_type(value, t),
+                    )
                 else:
                     raise NotImplementedError(f"Casting for type {field_type} has not been implemented")
 
@@ -204,12 +174,15 @@ class Schema:
 
     def _cast_field(self, key: str, field: Any) -> Any:
         target_type, cast_func = self._cast_table()[key]
-        if isinstance(field, target_type):
+        # Containers still go through cast_struct/cast_list so their contents get cast.
+        if isinstance(field, target_type) and target_type not in (dict, list):
             return field
         return cast_func(field)
     
     def _cast_value_to_type(self, value: Any, target_type: pa.DataType) -> Any:
         """Cast a value to a specific PyArrow type using the existing casting logic."""
+        if value is None:
+            return None
         if pa_types.is_boolean(target_type):
             if isinstance(value, int):
                 return value == 1
@@ -236,7 +209,13 @@ class Schema:
         elif pa_types.is_binary(target_type):
             return bytes(value) if value is not None else b""
         elif pa_types.is_struct(target_type):
-            return dict(value) if value is not None else {}
+            if not isinstance(value, dict):
+                return {}
+            return {
+                field.name: self._cast_value_to_type(value[field.name], field.type)
+                for field in target_type
+                if field.name in value
+            }
         elif pa_types.is_list(target_type):
             # Handle nested lists recursively
             if value is None:
@@ -547,16 +526,8 @@ def infer_type(value: Any, name: str) -> pa.DataType:
             return pa.int64()
 
     if isinstance(value, float):
-        try:
-            pa.scalar(value, pa.float32())
-            return pa.float32()
-        except (OverflowError, pa.ArrowInvalid):
-            try:
-                pa.scalar(value, pa.float64())
-            except (OverflowError, pa.ArrowInvalid) as err:
-                err.add_note(f"Overflow for value {value} of {name}: {err.add_note}")
-                raise err
-            return pa.float64()
+        # BSON doubles are 64-bit; float32 would silently drop precision (e.g. 19997987226.0)
+        return pa.float64()
 
     if isinstance(value, bytes):
         return pa.binary()
